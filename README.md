@@ -1,5 +1,5 @@
 # ShieldBreak Win10 — Research Analysis
-## ASI Internship Research — Rainfantry
+
 
 > **Purpose:** Vulnerability research and defensive analysis of MSNightmare's ShieldBreak privilege escalation technique, with focus on Win10 attack surface.
 
@@ -143,7 +143,7 @@ Result: "System cannot execute" / "Virus found"
 1. **Behavioral heuristics** — Process spawning patterns, pipe creation, privilege indicators
 2. **Signature matching** — Known ShieldBreak samples in Defender's database
 
-**The Irony:** ShieldBreak requires Defender to be running (Stage 3 uses it), but Defender also detects the payload. Real-world attackers would need additional evasion — which is outside scope of this defensive research.
+**The Irony:** ShieldBreak requires Defender to be running (Stage 3 uses it), but Defender also detects the payload. Real-world attackers would need additional evon — which is outside scope of this defensive research.
 
 ### phoneinfo.dll Variance
 
@@ -234,10 +234,6 @@ This validates that current Defender signatures and behavioral heuristics catch 
 
 ---
 
-## Credits
-
-- **MSNightmare (ASI)** — Original ShieldBreak research
-- **Rainfantry** — Win10 portability analysis
 
 ---
 
@@ -250,7 +246,6 @@ This documentation is for authorized security research and defensive analysis on
 ---
 
 # סיכום מחקר ShieldBreak Win10
-## פרויקט התמחות ASI — Rainfantry
 
 > **מטרה:** מחקר פגיעויות וניתוח הגנתי של טכניקת הסלמת הרשאות ShieldBreak של MSNightmare, עם התמקדות במשטח התקיפה של Windows 10.
 
@@ -351,7 +346,7 @@ ShieldBreak היא שרשרת הסלמת הרשאות מ-User ל-SYSTEM שמנצ
 
 ## קרדיטים
 
-- **MSNightmare (ASI)** — מחקר ShieldBreak המקורי
+- **MSNightmare ** — מחקר ShieldBreak המקורי
 - **Rainfantry** — ניתוח ניידות ל-Win10
 
 ---

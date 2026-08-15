@@ -1,0 +1,29 @@
+# Compiled binaries
+*.exe
+*.dll
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# Visual Studio
+*.vcxproj.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+.vs/
+Debug/
+Release/
+x64/
+x86/
+
+# Build outputs
+*.log
+BuildLog.htm
+
+# OS files
+Thumbs.db
+.DS_Store

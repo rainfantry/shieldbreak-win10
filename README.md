@@ -1,137 +1,158 @@
-# ShieldBreak Win10 Port
-## ASI Internship Project - Rainfantry
+# ShieldBreak Win10 — Research Analysis
+## ASI Internship Research — Rainfantry
 
-**Goal:** Port MSNightmare's ShieldBreak (Win11 0day) to Windows 10 for ASI's defensive security toolkit.
-
-**Status:** ✓ COMPLETE — Full exploit chain implemented
+> **Purpose:** Vulnerability research and defensive analysis of MSNightmare's ShieldBreak privilege escalation technique, with focus on Win10 attack surface.
 
 ---
 
-## Quick Start
+## Executive Summary
 
-### Prerequisites
-- Windows 10 VM (tested on build 19045/26200)
-- Visual Studio 2022 with C++ Desktop Development
-- Standard user account (run exploit as NON-admin)
-- Windows Defender enabled (required for exploit)
+ShieldBreak is a User→SYSTEM privilege escalation chain that abuses the interaction between Windows Cloud Files API, Windows Defender scanning behavior, and CLFS (Common Log File System) race conditions. Originally targeting Windows 11, this research explores portability to Windows 10.
 
-### Step 1: Clone Repository
-```cmd
-cd C:\Phantom
-git clone https://github.com/rainfantry/shieldbreak-win10.git
-cd shieldbreak-win10\win10-port
-```
-
-### Step 2: Open Developer Command Prompt
-```cmd
-"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-```
-Or use "x64 Native Tools Command Prompt for VS 2022" from Start Menu.
-
-### Step 3: Compile Payload DLL
-```cmd
-cl.exe /LD warden_win10.cpp /Fe:warden_win10.dll user32.lib advapi32.lib
-```
-
-### Step 4: Compile Main Exploit
-```cmd
-cl.exe shieldbreak_win10.cpp /Fe:shieldbreak_win10.exe /link ntdll.lib CldApi.lib ole32.lib taskschd.lib advapi32.lib user32.lib
-```
-
-### Step 5: Run Exploit (as standard user, NOT admin)
-```cmd
-shieldbreak_win10.exe
-```
-
-### Step 6: Verify Success
-```cmd
-type C:\SHIELDBREAK_SYSTEM.txt
-```
-If file contains "Running as: SYSTEM" → **EXPLOIT SUCCESSFUL**
+**Key Finding:** The core primitives (Cloud Files API, Object Manager symlinks, Defender scan triggers) function on Win10 1709+, but the full chain requires adaptation due to `phoneinfo.dll` differences between OS versions.
 
 ---
 
-## Testing Individual Stages
+## Architecture Analysis
 
-Before running the full exploit, test each stage independently:
+### The 7-Stage Exploit Chain
 
-### Stage 1: Cloud Files API
-```cmd
-cl.exe stage1_test_cloudfiles.cpp /Fe:stage1_test.exe /link CldApi.lib ole32.lib
-stage1_test.exe
 ```
-**Expected:** "STAGE 1 PASSED: Cloud Files API works on this system!"
-
-### Stage 2: Object Manager Namespaces
-```cmd
-cl.exe stage2_test_objmgr.cpp /Fe:stage2_test.exe /link ntdll.lib
-stage2_test.exe
+┌─────────────────────────────────────────────────────────────────────┐
+│  STAGE 1: Cloud Files Provider Registration                         │
+│  ─────────────────────────────────────────────────────────────────  │
+│  CfRegisterSyncRoot() → Register fake OneDrive-style sync provider  │
+│  CfCreatePlaceholders() → Create "cloud" file that hydrates on      │
+│                           access with attacker-controlled content   │
+│                                                                     │
+│  WHY IT WORKS: Cloud Files API allows unprivileged users to create  │
+│  files that trigger callbacks when accessed — file content is       │
+│  supplied by the registering process, not read from disk.           │
+└─────────────────────────────────────────────────────────────────────┘
+                                ↓
+┌─────────────────────────────────────────────────────────────────────┐
+│  STAGE 2: Object Manager Namespace Manipulation                     │
+│  ─────────────────────────────────────────────────────────────────  │
+│  \BaseNamedObjects\Restricted\WD_TARGET_<guid>\                     │
+│  \BaseNamedObjects\Restricted\WD_SHADOW_<guid>\WD_SCAN → symlink    │
+│                                                                     │
+│  WHY IT WORKS: Standard users can create directories and symbolic   │
+│  links in \BaseNamedObjects\Restricted\. These symlinks redirect    │
+│  file operations to attacker-controlled paths.                      │
+└─────────────────────────────────────────────────────────────────────┘
+                                ↓
+┌─────────────────────────────────────────────────────────────────────┐
+│  STAGE 3: Windows Defender Scan Trigger                             │
+│  ─────────────────────────────────────────────────────────────────  │
+│  MpManagerOpen() → Connect to Defender via MpClient.dll             │
+│  MpScanStart() → Trigger scan on cloud placeholder                  │
+│                                                                     │
+│  WHY IT WORKS: Defender runs as SYSTEM and will follow symbolic     │
+│  links when scanning. The EICAR test file triggers scan behavior    │
+│  without actual malware.                                            │
+└─────────────────────────────────────────────────────────────────────┘
+                                ↓
+┌─────────────────────────────────────────────────────────────────────┐
+│  STAGE 4: CLFS Race Condition (TOCTOU)                              │
+│  ─────────────────────────────────────────────────────────────────  │
+│  ReadDirectoryChangesW() → Watch for CLFS log file creation         │
+│  LockFileEx() → Lock CLFS log mid-operation                         │
+│  Delete symlink → Recreate pointing to target DLL                   │
+│                                                                     │
+│  WHY IT WORKS: Classic time-of-check-to-time-of-use. Between        │
+│  Defender checking the path and writing to it, the symlink target   │
+│  is swapped to point elsewhere.                                     │
+└─────────────────────────────────────────────────────────────────────┘
+                                ↓
+┌─────────────────────────────────────────────────────────────────────┐
+│  STAGE 5: DLL Payload Write via NTFS ADS                            │
+│  ─────────────────────────────────────────────────────────────────  │
+│  Target: C:\Windows\System32\phoneinfo.dll:stream                   │
+│  Defender's file operation writes attacker DLL via alternate stream │
+│                                                                     │
+│  WHY IT WORKS: NTFS Alternate Data Streams allow writing to         │
+│  protected locations indirectly. The ADS is later mapped as         │
+│  executable code.                                                   │
+└─────────────────────────────────────────────────────────────────────┘
+                                ↓
+┌─────────────────────────────────────────────────────────────────────┐
+│  STAGE 6: WER Task Trigger                                          │
+│  ─────────────────────────────────────────────────────────────────  │
+│  Create: C:\ProgramData\Microsoft\Windows\WER\ReportQueue\...       │
+│  ITaskService → Run "QueueReporting" scheduled task                 │
+│                                                                     │
+│  WHY IT WORKS: WER QueueReporting runs as SYSTEM and loads DLLs     │
+│  from predictable locations. phoneinfo.dll is in the search path.  │
+└─────────────────────────────────────────────────────────────────────┘
+                                ↓
+┌─────────────────────────────────────────────────────────────────────┐
+│  STAGE 7: SYSTEM Code Execution                                     │
+│  ─────────────────────────────────────────────────────────────────  │
+│  Payload DLL executes in SYSTEM context                             │
+│  Named pipe callback to user process                                │
+│  Proof: C:\SHIELDBREAK_SYSTEM.txt written as SYSTEM                 │
+└─────────────────────────────────────────────────────────────────────┘
 ```
-**Expected:** "STAGE 2 PASSED: Object Manager manipulation works!"
-
-### Stage 3: Windows Defender API
-```cmd
-cl.exe stage3_test_defender.cpp /Fe:stage3_test.exe /link ole32.lib
-stage3_test.exe
-```
-**Expected:** "STAGE 3 PASSED: Windows Defender API accessible!"
 
 ---
 
-## The Exploit Chain (7 Stages)
+## Research Journey
 
-ShieldBreak chains multiple Windows internals techniques to achieve User→SYSTEM privilege escalation:
+### Initial Approach (Dead End)
+Started with standalone WER DLL hijacking research. Discovered the specific vector targeting `wer.dll` search order was patched in Win10 build 19045+.
 
+### Pivot to ShieldBreak
+Identified MSNightmare's ShieldBreak as the current state-of-art for this vulnerability class. ShieldBreak README noted: "Windows 10... are not currently supported" — became the research target.
+
+### Stage-by-Stage Validation
+
+| Stage | Component | Win10 Status | Notes |
+|-------|-----------|--------------|-------|
+| 1 | Cloud Files API | ✓ WORKS | Available Win10 1709+ |
+| 2 | Object Manager | ✓ WORKS | \BaseNamedObjects\Restricted\ accessible |
+| 3 | Defender API | ✓ WORKS | MpClient.dll loads, MpManagerOpen succeeds |
+| 4 | CLFS Race | UNTESTED | Integrated in full chain |
+| 5 | DLL Write | BLOCKED | CF_PLACEHOLDER error 0x8007017C |
+| 6 | WER Trigger | UNTESTED | Depends on Stage 5 |
+| 7 | Shell | UNTESTED | Depends on Stage 6 |
+
+### Blocking Issue: CF_PLACEHOLDER Error
+
+The simplified Win10 port encountered `0x8007017C` during `CfCreatePlaceholders()`. This indicates the sync root registration was incomplete — the original ShieldBreak uses a more sophisticated Cloud Files setup that wasn't fully replicated.
+
+**Resolution Path:** Use MSNightmare's original ShieldBreak.cpp as reference for proper CF_SYNC_ROOT configuration.
+
+### phoneinfo.dll Variance
+
+| OS Version | phoneinfo.dll | Implication |
+|------------|---------------|-------------|
+| Win11 | Does not exist | Exploit creates it ✓ |
+| Win10 (some builds) | May exist | Requires alternative target |
+
+Alternative targets for Win10 if phoneinfo.dll exists:
+- `fveapi.dll` (BitLocker)
+- `edputil.dll` (Enterprise Data Protection)
+- Other absent DLLs in SYSTEM service search paths
+
+---
+
+## Compilation Notes
+
+### Macro Redefinition Warnings (C4005)
+
+When building, 64 warnings appear:
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  STAGE 1: Cloud Files Provider                                  │
-│  CfRegisterSyncRoot() → Fake OneDrive-style sync provider      │
-│  CfCreatePlaceholders() → Create "cloud" file (hydrates on     │
-│                           access with our payload)              │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│  STAGE 2: Object Manager Namespaces                             │
-│  \BaseNamedObjects\Restricted\WD_TARGET_<guid>\                 │
-│  \BaseNamedObjects\Restricted\WD_SHADOW_<guid>\WD_SCAN →       │
-│                                              symlink to workdir │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│  STAGE 3: Windows Defender Scan Trigger                         │
-│  MpManagerOpen() → Connect to Defender via MpClient.dll        │
-│  MpScanStart() → Trigger scan on our cloud placeholder         │
-│  Defender follows symlinks into our controlled directory        │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│  STAGE 4: CLFS Race Condition                                   │
-│  ReadDirectoryChangesW() → Watch for CLFS log file creation    │
-│  LockFileEx() → Lock the CLFS log mid-operation                │
-│  Delete symlink → Recreate pointing to phoneinfo.dll           │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│  STAGE 5: DLL Payload Write                                     │
-│  CfHydratePlaceholder() → "Hydrate" with warden_win10.dll      │
-│  Target: C:\Windows\System32\phoneinfo.dll:stream              │
-│  Defender's file operation gets redirected via NTFS ADS        │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│  STAGE 6: WER Task Trigger                                      │
-│  Create: C:\ProgramData\Microsoft\Windows\WER\ReportQueue\...  │
-│  ITaskService → Run "QueueReporting" scheduled task            │
-│  WER runs as SYSTEM → loads our payload DLL                    │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│  STAGE 7: SYSTEM Shell                                          │
-│  warden_win10.dll executes as SYSTEM                           │
-│  Connects to \\.\pipe\SHIELDBREAK_WIN10                        │
-│  Writes proof to C:\SHIELDBREAK_SYSTEM.txt                     │
-│  Spawns visible SYSTEM cmd.exe                                  │
-└─────────────────────────────────────────────────────────────────┘
+warning C4005: 'STATUS_WAIT_0': macro redefinition
+```
+
+**Explanation:** Both `ntstatus.h` and `winnt.h` define `STATUS_*` constants. ShieldBreak needs NT APIs (requiring `ntstatus.h`) but `windows.h` includes `winnt.h` automatically. Since values are identical, warnings are cosmetic — build succeeds.
+
+**Fix (optional):**
+```cpp
+#define WIN32_NO_STATUS
+#include <windows.h>
+#undef WIN32_NO_STATUS
+#include <ntstatus.h>
 ```
 
 ---
@@ -140,124 +161,161 @@ ShieldBreak chains multiple Windows internals techniques to achieve User→SYSTE
 
 ```
 shieldbreak-win10/
-├── README.md                              ← This file
+├── README.md                    ← This analysis document
 ├── original/
-│   ├── ShieldBreak.cpp                    ← MSNightmare's Win11 source (reference)
-│   ├── Report.wer                         ← WER report template
-│   └── Warden_payload.cpp                 ← Original payload template
+│   ├── ShieldBreak.cpp          ← MSNightmare's Win11 source (reference)
+│   ├── Report.wer               ← WER report template
+│   └── Warden_payload.cpp       ← Payload template
 ├── win10-port/
-│   ├── shieldbreak_win10.cpp              ← MAIN EXPLOIT (full chain)
-│   ├── warden_win10.cpp                   ← PAYLOAD DLL
-│   ├── stage1_test_cloudfiles.cpp         ← Cloud Files API test
-│   ├── stage2_test_objmgr.cpp             ← Object Manager test
-│   └── stage3_test_defender.cpp           ← Defender API test
-└── analysis/
-    └── notes.md                           ← Research notes
+│   ├── shieldbreak_win10.cpp    ← Win10 adaptation (WIP)
+│   ├── warden_win10.cpp         ← Payload DLL source
+│   ├── stage1_test_cloudfiles.cpp   ← Cloud Files API test
+│   ├── stage2_test_objmgr.cpp       ← Object Manager test
+│   └── stage3_test_defender.cpp     ← Defender API test
+└── .gitignore                   ← Excludes compiled binaries
 ```
 
 ---
 
-## Win10 Adaptation Notes
+## Defensive Insights
 
-### phoneinfo.dll Target
-The original ShieldBreak writes to `C:\Windows\System32\phoneinfo.dll`.
+### Detection Opportunities
 
-| Windows Version | phoneinfo.dll Status | Action |
-|-----------------|---------------------|--------|
-| Win11 | Doesn't exist | Exploit creates it ✓ |
-| Win10 (some builds) | May exist | Need alternative target |
+1. **Cloud Files Provider Registration** — Monitor `CfRegisterSyncRoot()` calls from unusual processes
+2. **Object Manager Symlinks** — Alert on symlink creation in `\BaseNamedObjects\Restricted\` pointing to System32
+3. **CLFS Log Manipulation** — Unusual CLFS activity combined with symlink operations
+4. **WER Task Execution** — QueueReporting task triggered without corresponding crash
+5. **phoneinfo.dll Creation** — This DLL shouldn't exist on Win11; creation is suspicious
 
-**Check on your VM:**
-```cmd
-dir C:\Windows\System32\phoneinfo.dll
-```
+### Mitigations
 
-If it exists, alternative targets to research:
-- `fveapi.dll` (BitLocker related)
-- `edputil.dll` (Enterprise Data Protection)
-- Other non-existent DLLs loaded by SYSTEM services
-
-### Windows Build Compatibility
-- **Tested:** Win10 19045 (22H2), Win10 26200
-- **Required:** Win10 1709+ (Cloud Files API)
-- **Defender:** Must be enabled and running
-
----
-
-## Troubleshooting
-
-### "Cannot load MpClient.dll"
-- Windows Defender is disabled or removed
-- Solution: Enable Defender in Windows Security settings
-
-### "CfRegisterSyncRoot failed"
-- Running as admin (don't do this)
-- Cloud Files service not available
-- Solution: Run as standard user
-
-### "Object Manager setup failed"
-- Running without proper permissions
-- Solution: Ensure standard user account
-
-### "WER task trigger failed"
-- Task Scheduler service not running
-- Solution: `net start schedule`
-
-### No SYSTEM shell received
-- Race condition timing issue
-- phoneinfo.dll already exists
-- Defender blocked the operation
-- Solution: Check Event Viewer, try again, or adjust timing
-
----
-
-## Testing Progress Tracker
-
-| Stage | Component | Status |
-|-------|-----------|--------|
-| 1 | Cloud Files API | ✓ PASSED |
-| 2 | Object Manager | ✓ PASSED |
-| 3 | Defender Scan | ✓ PASSED |
-| 4 | CLFS Race | INTEGRATED |
-| 5 | DLL Write | INTEGRATED |
-| 6 | WER Trigger | INTEGRATED |
-| 7 | Shell Callback | INTEGRATED |
-| **FULL** | **Complete Chain** | **READY** |
-
----
-
-## Success Indicators
-
-When the exploit works, you'll see:
-
-1. **Named pipe connection** — "SYSTEM SHELL CONNECTED!" in console
-2. **Proof file** — `C:\SHIELDBREAK_SYSTEM.txt` contains "Running as: SYSTEM"
-3. **SYSTEM cmd.exe** — New command window running as NT AUTHORITY\SYSTEM
-
-Verify with:
-```cmd
-type C:\SHIELDBREAK_SYSTEM.txt
-```
+- **Credential Guard** — Reduces impact of SYSTEM compromise
+- **Attack Surface Reduction** — Block Office apps from creating child processes
+- **WDAC/AppLocker** — Prevent unsigned DLL loading in System32
+- **Defender Tamper Protection** — Limits MpClient.dll abuse vectors
 
 ---
 
 ## References
 
 - **Original ShieldBreak:** https://github.com/MSNightmare/ShieldBreak
-- **RoguePlanet (CVE-2026-50656):** https://github.com/MSNightmare/RoguePlanet
 - **Cloud Files API:** https://docs.microsoft.com/en-us/windows/win32/api/cfapi/
-- **CLFS:** https://docs.microsoft.com/en-us/windows-hardware/drivers/kernel/introduction-to-the-common-log-file-system
-- **Object Manager:** Windows Internals, Part 1
+- **CLFS Documentation:** https://docs.microsoft.com/en-us/windows-hardware/drivers/kernel/introduction-to-the-common-log-file-system
+- **Object Manager:** Windows Internals, 7th Edition, Part 1
 
 ---
 
 ## Credits
 
-- **MSNightmare (ASI)** — Original ShieldBreak research & mentorship
-- **Rainfantry** — Win10 port adaptation
+- **MSNightmare (ASI)** — Original ShieldBreak research
+- **Rainfantry** — Win10 portability analysis
 
 ---
 
 ## Disclaimer
 
-This tool is for authorized security testing and research only. Use only on systems you own or have explicit permission to test. Part of ASI's defensive security toolkit for helping organizations understand and protect against privilege escalation vulnerabilities.
+This documentation is for authorized security research and defensive analysis only. Understanding attack techniques enables better detection and protection.
+
+---
+
+---
+
+# סיכום מחקר ShieldBreak Win10
+## פרויקט התמחות ASI — Rainfantry
+
+> **מטרה:** מחקר פגיעויות וניתוח הגנתי של טכניקת הסלמת הרשאות ShieldBreak של MSNightmare, עם התמקדות במשטח התקיפה של Windows 10.
+
+---
+
+## תקציר מנהלים
+
+ShieldBreak היא שרשרת הסלמת הרשאות מ-User ל-SYSTEM שמנצלת את האינטראקציה בין Windows Cloud Files API, התנהגות הסריקה של Windows Defender, ותנאי מירוץ ב-CLFS (Common Log File System). במקור מכוונת ל-Windows 11, מחקר זה בוחן ניידות ל-Windows 10.
+
+**ממצא מרכזי:** הפרימיטיבים המרכזיים (Cloud Files API, סימלינקים של Object Manager, טריגרים לסריקת Defender) עובדים על Win10 1709+, אך השרשרת המלאה דורשת התאמה בגלל הבדלי `phoneinfo.dll` בין גרסאות מערכת ההפעלה.
+
+---
+
+## ניתוח ארכיטקטורה
+
+### שרשרת הניצול בת 7 השלבים
+
+**שלב 1: רישום ספק Cloud Files**
+- `CfRegisterSyncRoot()` → רישום ספק סנכרון מזויף בסגנון OneDrive
+- `CfCreatePlaceholders()` → יצירת קובץ "ענן" שמתמלא בגישה עם תוכן בשליטת התוקף
+
+**שלב 2: מניפולציית מרחב השמות של Object Manager**
+- יצירת ספריות וסימלינקים ב-`\BaseNamedObjects\Restricted\`
+- הסימלינקים מפנים פעולות קבצים לנתיבים בשליטת התוקף
+
+**שלב 3: הפעלת סריקת Windows Defender**
+- `MpManagerOpen()` → התחברות ל-Defender דרך MpClient.dll
+- `MpScanStart()` → הפעלת סריקה על placeholder הענן
+
+**שלב 4: תנאי מירוץ CLFS (TOCTOU)**
+- `ReadDirectoryChangesW()` → מעקב אחר יצירת קובץ לוג CLFS
+- מחיקה ויצירה מחדש של סימלינק שמצביע על DLL יעד
+
+**שלב 5: כתיבת DLL דרך NTFS ADS**
+- יעד: `C:\Windows\System32\phoneinfo.dll:stream`
+- פעולת הקובץ של Defender כותבת DLL תוקף דרך alternate stream
+
+**שלב 6: הפעלת משימת WER**
+- יצירת דוח ב-`C:\ProgramData\Microsoft\Windows\WER\ReportQueue\`
+- הרצת המשימה המתוזמנת "QueueReporting"
+
+**שלב 7: הרצת קוד כ-SYSTEM**
+- ה-DLL של ה-payload מורץ בהקשר SYSTEM
+- הוכחה: `C:\SHIELDBREAK_SYSTEM.txt` נכתב כ-SYSTEM
+
+---
+
+## מסע המחקר
+
+### גישה ראשונית (מבוי סתום)
+התחלנו עם מחקר DLL hijacking עצמאי של WER. גילינו שהווקטור הספציפי תוקן ב-Win10 build 19045+.
+
+### מעבר ל-ShieldBreak
+זיהינו את ShieldBreak של MSNightmare כ-state-of-the-art הנוכחי למחלקת פגיעויות זו.
+
+### אימות שלב אחר שלב
+
+| שלב | רכיב | סטטוס Win10 |
+|-----|------|-------------|
+| 1 | Cloud Files API | ✓ עובד |
+| 2 | Object Manager | ✓ עובד |
+| 3 | Defender API | ✓ עובד |
+| 4 | מירוץ CLFS | לא נבדק |
+| 5 | כתיבת DLL | חסום (שגיאה 0x8007017C) |
+| 6 | טריגר WER | לא נבדק |
+| 7 | Shell | לא נבדק |
+
+---
+
+## תובנות הגנתיות
+
+### הזדמנויות זיהוי
+
+1. **רישום ספק Cloud Files** — ניטור קריאות `CfRegisterSyncRoot()` מתהליכים חריגים
+2. **סימלינקים של Object Manager** — התראה על יצירת סימלינק ב-`\BaseNamedObjects\Restricted\` שמצביע על System32
+3. **מניפולציית לוג CLFS** — פעילות CLFS חריגה בשילוב עם פעולות סימלינק
+4. **הרצת משימת WER** — משימת QueueReporting מופעלת ללא קריסה מתאימה
+5. **יצירת phoneinfo.dll** — קובץ DLL זה לא אמור להתקיים ב-Win11; יצירתו חשודה
+
+### הקשחות
+
+- **Credential Guard** — מפחית את ההשפעה של פריצת SYSTEM
+- **Attack Surface Reduction** — חסימת אפליקציות Office מיצירת תהליכי ילד
+- **WDAC/AppLocker** — מניעת טעינת DLL לא חתום ב-System32
+
+---
+
+## קרדיטים
+
+- **MSNightmare (ASI)** — מחקר ShieldBreak המקורי
+- **Rainfantry** — ניתוח ניידות ל-Win10
+
+---
+
+## הצהרת אחריות
+
+תיעוד זה מיועד למחקר אבטחה מורשה וניתוח הגנתי בלבד. הבנת טכניקות תקיפה מאפשרת זיהוי והגנה טובים יותר.

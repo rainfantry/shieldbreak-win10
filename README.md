@@ -30,12 +30,12 @@ Or use "x64 Native Tools Command Prompt for VS 2022" from Start Menu.
 
 ### Step 3: Compile Payload DLL
 ```cmd
-cl.exe /LD warden_win10.cpp /Fe:warden_win10.dll
+cl.exe /LD warden_win10.cpp /Fe:warden_win10.dll user32.lib advapi32.lib
 ```
 
 ### Step 4: Compile Main Exploit
 ```cmd
-cl.exe shieldbreak_win10.cpp /Fe:shieldbreak_win10.exe /link ntdll.lib CldApi.lib ole32.lib taskschd.lib advapi32.lib comsuppw.lib
+cl.exe shieldbreak_win10.cpp /Fe:shieldbreak_win10.exe /link ntdll.lib CldApi.lib ole32.lib taskschd.lib advapi32.lib user32.lib
 ```
 
 ### Step 5: Run Exploit (as standard user, NOT admin)

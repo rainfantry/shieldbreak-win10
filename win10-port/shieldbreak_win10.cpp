@@ -401,6 +401,12 @@ int main() {
     placeholder.FsMetadata.BasicInfo.LastAccessTime = placeholder.FsMetadata.BasicInfo.CreationTime;
     placeholder.FsMetadata.BasicInfo.ChangeTime = placeholder.FsMetadata.BasicInfo.CreationTime;
 
+    // CRITICAL FIX: FileIdentity is REQUIRED for Cloud Files to work
+    // Original ShieldBreak allocates 0x130 bytes for this
+    placeholder.FileIdentity = malloc(0x130);
+    memset(placeholder.FileIdentity, 0, 0x130);
+    placeholder.FileIdentityLength = 0x130;
+
     // WIN10 FIX: Use SUPERSEDE flag if file exists, and always mark in-sync
     placeholder.Flags = CF_PLACEHOLDER_CREATE_FLAG_MARK_IN_SYNC | CF_PLACEHOLDER_CREATE_FLAG_SUPERSEDE;
 

